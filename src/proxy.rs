@@ -20,11 +20,17 @@ pub async fn start_proxy(
     dest_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(proxy_addr).await?;
+    let cors = tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any);
+
     let app = Router::new()
         .route("/api_p1", post(save_diagram))
         .route("/api_p1/{file_id}", get(get_diagram))
         .route("/api_p1/{file_id}", delete(delete_diagram))
         .route("/api_p1/{file_id}/exists", get(check_exists))
+        .layer(cors)
         .with_state(dest_addr);
 
     axum::serve(listener, app).await?;
