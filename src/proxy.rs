@@ -12,7 +12,7 @@ pub mod class {
 
 use class::{
     diagram_service_client::DiagramServiceClient, Class, File, FileId, Method, Multiplicity,
-    Relation, RelationInfo, RelationInfoList, Variable, Visibility,
+    RelationInfo, RelationInfoList, Variable,
 };
 
 pub async fn start_proxy(
@@ -275,13 +275,8 @@ fn json_to_proto_variable(json: &serde_json::Value) -> Result<Variable, String> 
 
     let visibility = json
         .get("visibility")
-        .and_then(|v| v.as_str())
-        .and_then(|v| match v {
-            "PUBLIC" => Some(Visibility::Public as i32),
-            "PRIVATE" => Some(Visibility::Private as i32),
-            "PROTECTED" => Some(Visibility::Protected as i32),
-            _ => Some(Visibility::NonModifier as i32),
-        });
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
 
     let is_static = json.get("is_static").and_then(|v| v.as_bool());
 
@@ -306,14 +301,9 @@ fn json_to_proto_method(json: &serde_json::Value) -> Result<Method, String> {
 
     let visibility = json
         .get("visibility")
-        .and_then(|v| v.as_str())
-        .and_then(|v| match v {
-            "PUBLIC" => Some(Visibility::Public as i32),
-            "PRIVATE" => Some(Visibility::Private as i32),
-            "PROTECTED" => Some(Visibility::Protected as i32),
-            _ => Some(Visibility::NonModifier as i32),
-        })
-        .unwrap_or(Visibility::NonModifier as i32);
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32)
+        .unwrap_or(0);
 
     let is_abstract = json.get("is_abstract").and_then(|v| v.as_bool());
 
@@ -348,16 +338,9 @@ fn json_to_proto_relation(json: &serde_json::Value) -> Result<RelationInfo, Stri
 
     let relation = json
         .get("relation")
-        .and_then(|v| v.as_str())
-        .and_then(|v| match v {
-            "INHERITANCE" => Some(Relation::Inheritance as i32),
-            "IMPLEMENTATION" => Some(Relation::Implementation as i32),
-            "ASSOCIATION" => Some(Relation::Association as i32),
-            "AGGREGATION" => Some(Relation::Aggregation as i32),
-            "COMPOSITION" => Some(Relation::Composition as i32),
-            _ => Some(Relation::None as i32),
-        })
-        .unwrap_or(Relation::None as i32);
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32)
+        .unwrap_or(0);
 
     let multiplicity_p = json
         .get("multiplicity_p")
@@ -449,32 +432,15 @@ fn proto_class_to_json(class: &Class) -> serde_json::Value {
 }
 
 fn proto_variable_to_json(variable: &Variable) -> serde_json::Value {
-    let visibility = variable
-        .visibility
-        .and_then(|v| match v {
-            v if v == Visibility::Public as i32 => Some("PUBLIC"),
-            v if v == Visibility::Private as i32 => Some("PRIVATE"),
-            v if v == Visibility::Protected as i32 => Some("PROTECTED"),
-            _ => Some("NON_MODIFIER"),
-        })
-        .unwrap_or("NON_MODIFIER");
-
     serde_json::json!({
         "name": variable.name,
         "type": variable.r#type,
-        "visibility": visibility,
+        "visibility": variable.visibility,
         "is_static": variable.is_static
     })
 }
 
 fn proto_method_to_json(method: &Method) -> serde_json::Value {
-    let visibility = match method.visibility {
-        v if v == Visibility::Public as i32 => "PUBLIC",
-        v if v == Visibility::Private as i32 => "PRIVATE",
-        v if v == Visibility::Protected as i32 => "PROTECTED",
-        _ => "NON_MODIFIER",
-    };
-
     let parameters: Vec<serde_json::Value> = method
         .parameters
         .iter()
@@ -484,7 +450,7 @@ fn proto_method_to_json(method: &Method) -> serde_json::Value {
     serde_json::json!({
         "name": method.name,
         "return_type": method.return_type,
-        "visibility": visibility,
+        "visibility": method.visibility,
         "is_abstract": method.is_abstract,
         "is_static": method.is_static,
         "parameters": parameters
@@ -492,15 +458,6 @@ fn proto_method_to_json(method: &Method) -> serde_json::Value {
 }
 
 fn proto_relation_to_json(relation: &RelationInfo) -> serde_json::Value {
-    let relation_type = match relation.relation {
-        v if v == Relation::Inheritance as i32 => "INHERITANCE",
-        v if v == Relation::Implementation as i32 => "IMPLEMENTATION",
-        v if v == Relation::Association as i32 => "ASSOCIATION",
-        v if v == Relation::Aggregation as i32 => "AGGREGATION",
-        v if v == Relation::Composition as i32 => "COMPOSITION",
-        _ => "NONE",
-    };
-
     let multiplicity_p = relation
         .multiplicity_p
         .as_ref()
@@ -515,7 +472,7 @@ fn proto_relation_to_json(relation: &RelationInfo) -> serde_json::Value {
 
     serde_json::json!({
         "target_class_id": relation.target_class_id,
-        "relation": relation_type,
+        "relation": relation.relation,
         "multiplicity_p": multiplicity_p,
         "multiplicity_c": multiplicity_c,
         "role_name_p": relation.role_name_p,
