@@ -16,16 +16,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // gRPCサーバの起動
     println!("gRPC server address: {}", server_addr);
-    let server_handle = tokio::spawn(async move {
+    let (server_ready_tx, server_ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut server_handle = tokio::spawn(async move {
         println!("Starting gRPC server on {}", server_addr);
-        if let Err(e) = server::start_server(server_addr).await {
-            eprintln!("gRPC server error: {}", e);
+        match server::start_server(server_addr).await {
+            Ok(service) => {
+                println!("gRPC server started successfully");
+                // サーバーが起動したことを通知
+                let _ = server_ready_tx.send(Ok(()));
+
+                // シャットダウンシグナルを待機
+                let _ = shutdown_rx.await;
+                println!("Server received shutdown signal, creating snapshot...");
+
+                // シャットダウン時にスナップショットを作成
+                if let Err(e) = service.save_to_disk().await {
+                    eprintln!("Failed to save snapshot during shutdown: {}", e);
+                } else {
+                    println!("Snapshot saved successfully during shutdown");
+                }
+            }
+            Err(e) => {
+                eprintln!("gRPC server error: {}", e);
+                // エラーの場合はエラーを通知
+                let _ = server_ready_tx.send(Err(e));
+            }
         }
     });
 
+    // サーバーが起動するまで待機
+    println!("Waiting for gRPC server to start...");
+    match server_ready_rx.await {
+        Ok(Ok(())) => {
+            println!("gRPC server startup notification received");
+        }
+        Ok(Err(e)) => {
+            eprintln!("gRPC server failed to start: {}", e);
+            return Err(format!("gRPC server startup failed: {}", e).into());
+        }
+        Err(_) => {
+            eprintln!("Failed to receive server startup notification");
+            return Err("Server startup notification channel closed".into());
+        }
+    }
+
     // RESTプロキシの起動
     println!("REST proxy address: {}", proxy_addr);
-    let proxy_handle = tokio::spawn(async move {
+    let mut proxy_handle = tokio::spawn(async move {
         println!("Starting REST proxy on {}", proxy_addr);
         if let Err(e) = proxy::start_proxy(proxy_addr, server_addr).await {
             eprintln!("REST proxy error: {}", e);
@@ -40,16 +78,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Received shutdown signal, stopping servers...");
     };
 
-    // どちらかのタスクが完了するか、シャットダウンシグナルを受信するまで待機
+    // プロキシまたはサーバーが何らかで終了するか、シャットダウンシグナルを受信するまで待機
     tokio::select! {
-        _ = server_handle => {
+        _ = &mut server_handle => {
             println!("gRPC server stopped");
         }
-        _ = proxy_handle => {
+        _ = &mut proxy_handle => {
             println!("REST proxy stopped");
         }
         _ = shutdown_signal => {
-            println!("Shutdown signal received, terminating...");
+            println!("Shutdown signal received, initiating graceful shutdown...");
+
+            // サーバーにシャットダウンシグナルを送信
+            let _ = shutdown_tx.send(());
+
+            // サーバーのスナップショット作成が完了するまで待機（タイムアウトあり）
+            println!("Waiting for server to complete snapshot creation...");
+            let timeout = tokio::time::timeout(
+                tokio::time::Duration::from_secs(60),
+                server_handle
+            );
+
+            match timeout.await {
+                Ok(_) => {
+                    println!("Graceful shutdown completed");
+                }
+                Err(_) => {
+                    println!("Shutdown timeout exceeded, forcing termination");
+                }
+            }
         }
     }
 

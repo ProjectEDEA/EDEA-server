@@ -1,5 +1,6 @@
 use prost::Message;
 use std::collections::HashMap;
+use std::io::Read;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,7 +19,7 @@ use class::{
     File, FileId, Result as ProtoResult,
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct DiagramServiceImpl {
     // ファイルをメモリ内に保存するためのストレージ
     files: Arc<Mutex<HashMap<String, File>>>,
@@ -34,7 +35,7 @@ impl DiagramServiceImpl {
         }
     }
 
-    // ファイルをディスクに保存
+    // インメモリ情報をディスクにダンプ
     pub async fn save_to_disk(&self) -> Result<(), Box<dyn std::error::Error>> {
         let files = {
             let files_guard = self.files.lock().map_err(|_| "Failed to acquire lock")?;
@@ -42,19 +43,57 @@ impl DiagramServiceImpl {
         };
 
         // ディレクトリが存在しない場合は作成
-        fs::create_dir_all(&self.persistence_dir).await?;
-
+        tokio::fs::create_dir_all(&self.persistence_dir).await?;
+        let file_path = format!("{}/snapshot.bin", self.persistence_dir);
+        
+        // HashMapをバイナリとしてシリアライズ
+        let mut buffer = Vec::new();
+        
+        // ファイル数を最初に書き込み
+        let file_count = files.len() as u32;
+        buffer.extend_from_slice(&file_count.to_be_bytes());
+        
+        // 各ファイルをエンコード
         for (file_id, file) in files.iter() {
-            let file_path = format!("{}/{}.bin", self.persistence_dir, file_id);
+            // ファイルIDの長さとファイルIDを書き込み
+            let file_id_bytes = file_id.as_bytes();
+            let file_id_len = file_id_bytes.len() as u32;
+            buffer.extend_from_slice(&file_id_len.to_be_bytes());
+            buffer.extend_from_slice(file_id_bytes);
+            
+            // ファイルデータをエンコード
+            let mut file_buffer = Vec::new();
+            file.encode(&mut file_buffer)?;
+            
+            // ファイルデータの長さとファイルデータを書き込み
+            let file_data_len = file_buffer.len() as u32;
+            buffer.extend_from_slice(&file_data_len.to_be_bytes());
+            buffer.extend_from_slice(&file_buffer);
+        }
+        
+        tokio::fs::write(file_path, buffer).await?;
+
+        println!("Saved {} files snapshot to disk", files.len());
+        Ok(())
+    }
+
+    // ファイルをディスクにエクスポート
+    pub async fn export_files(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let files = self.files.lock().map_err(|_| "Failed to acquire lock")?;
+        let date = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
+
+        // エクスポートディレクトリを作成
+        tokio::fs::create_dir_all(format!("{}/exported/{}", self.persistence_dir, date)).await?;
+        for (file_id, file) in files.iter() {
+            let file_path = format!("{}/exported/{}/{}.bin", self.persistence_dir, date, file_id);
 
             // FileメッセージをProtobufバイナリにシリアライズ
             let mut buffer = Vec::new();
             file.encode(&mut buffer)?;
 
-            fs::write(&file_path, buffer).await?;
+            tokio::fs::write(&file_path, buffer).await?;
         }
 
-        println!("Saved {} files to disk", files.len());
         Ok(())
     }
 
@@ -67,28 +106,51 @@ impl DiagramServiceImpl {
             return Ok(());
         }
 
-        let mut dir_entries = fs::read_dir(persistence_dir).await?;
-        let mut loaded_count = 0;
+        let snapshot_path = format!("{}/snapshot.bin", self.persistence_dir);
+        let snapshot_file = std::path::Path::new(&snapshot_path);
 
-        while let Some(entry) = dir_entries.next_entry().await? {
-            let path = entry.path();
-
-            if path.extension().and_then(|s| s.to_str()) == Some("bin") {
-                let file_content = fs::read(&path).await?;
-
-                // バイナリデータからFileメッセージを復元
-                let file = File::decode(&file_content[..])?;
-
-                if let Some(file_id) = &file.file_id {
-                    let mut files = self.files.lock().map_err(|_| "Failed to acquire lock")?;
-
-                    files.insert(file_id.id.clone(), file);
-                    loaded_count += 1;
-                }
-            }
+        if !snapshot_file.exists() {
+            println!("Snapshot file does not exist, starting with empty storage");
+            return Ok(());
         }
 
-        println!("Loaded {} files from disk", loaded_count);
+        let file_content = fs::read(snapshot_file).await?;
+        let mut cursor = std::io::Cursor::new(file_content);
+        
+        // ファイル数を読み取り
+        let mut file_count_bytes = [0u8; 4];
+        cursor.read_exact(&mut file_count_bytes)?;
+        let file_count = u32::from_be_bytes(file_count_bytes);
+        
+        let mut files = self.files.lock().map_err(|_| "Failed to acquire lock")?;
+        
+        // 各ファイルをデコード
+        for _ in 0..file_count {
+            // ファイルIDの長さを読み取り
+            let mut file_id_len_bytes = [0u8; 4];
+            cursor.read_exact(&mut file_id_len_bytes)?;
+            let file_id_len = u32::from_be_bytes(file_id_len_bytes) as usize;
+            
+            // ファイルIDを読み取り
+            let mut file_id_bytes = vec![0u8; file_id_len];
+            cursor.read_exact(&mut file_id_bytes)?;
+            let file_id = String::from_utf8(file_id_bytes)?;
+            
+            // ファイルデータの長さを読み取り
+            let mut file_data_len_bytes = [0u8; 4];
+            cursor.read_exact(&mut file_data_len_bytes)?;
+            let file_data_len = u32::from_be_bytes(file_data_len_bytes) as usize;
+            
+            // ファイルデータを読み取り
+            let mut file_data_bytes = vec![0u8; file_data_len];
+            cursor.read_exact(&mut file_data_bytes)?;
+            
+            // ファイルデータをデコード
+            let file = File::decode(&file_data_bytes[..])?;
+            files.insert(file_id, file);
+        }
+
+        println!("Loaded {} files from disk", files.len());
         Ok(())
     }
 
@@ -218,12 +280,12 @@ impl DiagramService for DiagramServiceImpl {
     }
 }
 
-pub async fn start_server(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
-    let diagram_service = DiagramServiceImpl::new();
+pub async fn start_server(addr: SocketAddr) -> Result<Arc<DiagramServiceImpl>, String> {
+    let diagram_service = Arc::new(DiagramServiceImpl::new());
 
     // 起動時にディスクからファイルを読み込み
     if let Err(e) = diagram_service.load_from_disk().await {
-        eprintln!("Warning: Failed to load files from disk: {}", e);
+        return Err(format!("Failed to load files from disk: {}", e));
     }
 
     // n分間隔で定期的にファイルを保存
@@ -237,13 +299,26 @@ pub async fn start_server(addr: SocketAddr) -> Result<(), Box<dyn std::error::Er
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any);
 
-    Server::builder()
-        .accept_http1(true)
-        .layer(GrpcWebLayer::new())
-        .layer(cors)
-        .add_service(DiagramServiceServer::new(diagram_service))
-        .serve(addr)
-        .await?;
+    let service_clone = Arc::clone(&diagram_service);
+    
+    // サーバーをバックグラウンドで起動
+    tokio::spawn(async move {
+        println!("gRPC server starting...");
+        if let Err(e) = Server::builder()
+            .accept_http1(true)
+            .layer(GrpcWebLayer::new())
+            .layer(cors)
+            .add_service(DiagramServiceServer::new((*service_clone).clone()))
+            .serve(addr)
+            .await
+        {
+            eprintln!("gRPC server error: {}", e);
+        }
+    });
 
-    Ok(())
+    // サーバーが起動するまで少し待機
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    println!("gRPC server should be ready now");
+
+    Ok(diagram_service)
 }
