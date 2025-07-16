@@ -1,10 +1,13 @@
 use prost::Message;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::fs;
 use tokio::time::interval;
 use tonic::{transport::Server, Request, Response, Status};
+use tonic_web::GrpcWebLayer;
+use tower_http::cors::CorsLayer;
 
 pub mod class {
     tonic::include_proto!("class");
@@ -215,8 +218,7 @@ impl DiagramService for DiagramServiceImpl {
     }
 }
 
-pub async fn start_server() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "127.0.0.1:50051".parse()?;
+pub async fn start_server(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
     let diagram_service = DiagramServiceImpl::new();
 
     // 起動時にディスクからファイルを読み込み
@@ -224,12 +226,21 @@ pub async fn start_server() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Warning: Failed to load files from disk: {}", e);
     }
 
-    // 5分間隔で定期的にファイルを保存
+    // n分間隔で定期的にファイルを保存
     diagram_service.start_periodic_save(1);
 
     println!("DiagramService gRPC server listening on {}", addr);
 
+    // CORS
+    let cors = CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any);
+
     Server::builder()
+        .accept_http1(true)
+        .layer(GrpcWebLayer::new())
+        .layer(cors)
         .add_service(DiagramServiceServer::new(diagram_service))
         .serve(addr)
         .await?;
