@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server_addr: SocketAddr = "127.0.0.1:50051"
         .parse()
         .map_err(|e| format!("Failed to parse server address: {}", e))?;
-    let proxy_addr: SocketAddr = "127.0.0.1:3000"
+    let proxy_addr: SocketAddr = "0.0.0.0:3000"
         .parse()
         .map_err(|e| format!("Failed to parse proxy address: {}", e))?;
 
